@@ -1,0 +1,21 @@
+[package]
+name = "atlist-rs"
+version = "0.1.0"
+authors = ["owent <admin@owent.net>"]
+license = "MIT OR Apache-2.0"
+description = "A LinkedList which is allowed to insert/remove element by immutable iterator.Adding, removing and moving the elements within the list or across several lists does not invalidate the iterators or references. An iterator is invalidated only when the corresponding element is deleted."
+homepage = "https://github.com/atframework/atlist-rs"
+repository = "https://github.com/atframework/libatbus-rs"
+documentation = "https://github.com/atframework/atlist-rs"
+keywords = ["collections", "list", "linkedlist"]
+categories = ["data-structures"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+#proc-macro = true
+bench = false # It's nightly now
+harness = true
+
+[dependencies]
