@@ -27,21 +27,6 @@
 //!
 //! ## Example
 //!
-//! ```rust,no_run
-//! extern crate atlist;
-//!
-//! use atlist::LinkedList;
-//!
-//! fn main() {
-//!         let mut list = LinkedList::new();
-//!         let _ = list.push_back(3);
-//!         let i = list.push_front(2);
-//!         let _ = list.insert_after(list.iter(), 4);
-//!         list.remove(i);
-//!
-//!         // assert_eq!(*cache.get(&"apple").unwrap(), 3);
-//! }
-//! ```
 
 //#![no_std]
 #![cfg_attr(feature = "nightly", feature(negative_impls, auto_traits))]
@@ -49,7 +34,9 @@
 //use alloc::borrow::Borrow;
 //use alloc::boxed::Box;
 use core::cell::{BorrowError, BorrowMutError, RefCell};
+use core::cmp::Ordering;
 use core::fmt;
+use core::hash::{Hash, Hasher};
 use core::iter::{Extend, FromIterator, FusedIterator};
 use core::marker::PhantomData;
 use core::mem;
@@ -59,6 +46,9 @@ use core::result::Result;
 use core::usize;
 use std::sync::{Arc, Weak};
 use std::{borrow::Borrow, error::Error};
+
+//#[cfg(test)]
+//extern crate rand;
 
 #[cfg(test)]
 mod tests;
@@ -145,16 +135,34 @@ pub struct Iter<T> {
     node: Weak<NodeWatcher<T>>,
 }
 
+pub struct IterMut<T> {
+    node: Weak<NodeWatcher<T>>,
+}
+
+struct IterInner<'a, T: 'a> {
+    node: Option<NonNull<Node<T>>>,
+    marker: PhantomData<&'a Node<T>>,
+}
+
 fn check_iter_valid<T>(iter: &Iter<T>) -> bool {
     iter.node.strong_count() > 0
 }
 
+fn check_iter_mut_valid<T>(iter: &IterMut<T>) -> bool {
+    iter.node.strong_count() > 0
+}
+
 impl<T> Node<T> {
+    #[inline]
     fn new(elt: T, container: NonNull<LinkedList<T>>) -> Box<Node<T>> {
+        Node::from(Arc::new(RefCell::new(elt)), container)
+    }
+
+    fn from(elt: LinkedListItem<T>, container: NonNull<LinkedList<T>>) -> Box<Node<T>> {
         let mut ret = Box::new(Node {
             next: None,
             prev: None,
-            element: Arc::new(RefCell::new(elt)),
+            element: elt,
             watcher: Arc::new(NodeWatcher {
                 owner: RefCell::new(None),
                 container: container,
@@ -176,8 +184,19 @@ impl<T> Node<T> {
 
 impl<T: fmt::Debug> fmt::Debug for Iter<T> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        //f.debug_tuple("Iter").field(&self.node.as_ref()).finish()
-        f.debug_tuple("Iter").finish()
+        if let Some(x) = self.node.upgrade() {
+            let current_node = if let Some(y) = *x.as_ref().owner.borrow() {
+                y
+            } else {
+                return f.debug_tuple("Iter: Borrow failed").finish();
+            };
+
+            f.debug_tuple("Iter")
+                .field(unsafe { current_node.as_ref() }.element.as_ref())
+                .finish()
+        } else {
+            f.debug_tuple("Iter: Empty").finish()
+        }
     }
 }
 
@@ -186,6 +205,43 @@ impl<T> Clone for Iter<T> {
         Iter {
             node: self.node.clone(),
         }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for IterMut<T> {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if let Some(x) = self.node.upgrade() {
+            let current_node = if let Some(y) = *x.as_ref().owner.borrow() {
+                y
+            } else {
+                return f.debug_tuple("Iter: Borrow failed").finish();
+            };
+
+            f.debug_tuple("Iter")
+                .field(unsafe { current_node.as_ref() }.element.as_ref())
+                .finish()
+        } else {
+            f.debug_tuple("Iter: Empty").finish()
+        }
+    }
+}
+
+impl<T: fmt::Debug> fmt::Debug for IterInner<'_, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let current_node = if let Some(y) = &self.node {
+            y
+        } else {
+            return f.debug_tuple("IterInner:EmptyBorrow failed").finish();
+        };
+        f.debug_tuple("IterInner")
+            .field(unsafe { current_node.as_ref() }.element.as_ref())
+            .finish()
+    }
+}
+
+impl<T> Clone for IterInner<'_, T> {
+    fn clone(&self) -> Self {
+        IterInner { ..*self }
     }
 }
 
@@ -221,7 +277,39 @@ impl<T> Iterator for Iter<T> {
     }
 }
 
-impl<'a, T> DoubleEndedIterator for Iter<T> {
+impl<T> Iterator for IterMut<T> {
+    type Item = LinkedListItem<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let watcher = self.node.upgrade()?;
+        let node = (*watcher.owner.borrow())?;
+
+        let ret = unsafe { node.as_ref().element.clone() };
+
+        let next_node = if let Some(next_watcher) = unsafe { &node.as_ref().next } {
+            unsafe { Arc::downgrade(&next_watcher.as_ref().watcher.borrow()) }
+        } else {
+            Weak::new()
+        };
+
+        self.node = next_node;
+        Some(ret)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        if check_iter_mut_valid(&self) {
+            (1, None)
+        } else {
+            (0, None)
+        }
+    }
+
+    fn count(self) -> usize {
+        self.size_hint().0
+    }
+}
+
+impl<T> DoubleEndedIterator for Iter<T> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         let watcher = self.node.upgrade()?;
@@ -240,7 +328,42 @@ impl<'a, T> DoubleEndedIterator for Iter<T> {
     }
 }
 
+impl<T> DoubleEndedIterator for IterMut<T> {
+    #[inline]
+    fn next_back(&mut self) -> Option<Self::Item> {
+        let watcher = self.node.upgrade()?;
+        let node = (*watcher.owner.borrow())?;
+
+        let ret = unsafe { node.as_ref().element.clone() };
+
+        let prev_node = if let Some(prev_watcher) = unsafe { &node.as_ref().prev } {
+            unsafe { Arc::downgrade(&prev_watcher.as_ref().watcher.borrow()) }
+        } else {
+            Weak::new()
+        };
+
+        self.node = prev_node;
+        Some(ret)
+    }
+}
+
+impl<'a, T> Iterator for IterInner<'a, T> {
+    type Item = &'a LinkedListItem<T>;
+
+    #[inline]
+    fn next(&mut self) -> Option<&'a LinkedListItem<T>> {
+        self.node.map(|node| unsafe {
+            // Need an unbound lifetime to get 'a
+            let node = &*node.as_ptr();
+            self.node = node.next;
+            &node.element
+        })
+    }
+}
+
 impl<T> FusedIterator for Iter<T> {}
+impl<T> FusedIterator for IterMut<T> {}
+impl<T> FusedIterator for IterInner<'_, T> {}
 
 impl<T> Iter<T> {
     fn new() -> Iter<T> {
@@ -251,6 +374,10 @@ impl<T> Iter<T> {
         Iter {
             node: Arc::downgrade(&node.watcher),
         }
+    }
+
+    fn from_weak(node: Weak<NodeWatcher<T>>) -> Iter<T> {
+        Iter { node: node }
     }
 
     #[inline]
@@ -310,7 +437,77 @@ impl<T> Iter<T> {
     }
 }
 
-// impl<T> FusedIterator for Iter<'_, T> {}
+impl<T> IterMut<T> {
+    fn new() -> IterMut<T> {
+        IterMut { node: Weak::new() }
+    }
+
+    fn from(node: &Node<T>) -> IterMut<T> {
+        IterMut {
+            node: Arc::downgrade(&node.watcher),
+        }
+    }
+
+    fn from_weak(node: Weak<NodeWatcher<T>>) -> IterMut<T> {
+        IterMut { node: node }
+    }
+
+    #[inline]
+    #[allow(unused)]
+    fn next_watcher(&self) -> Weak<NodeWatcher<T>> {
+        let watcher = if let Some(x) = self.node.upgrade() {
+            x
+        } else {
+            return Weak::new();
+        };
+
+        let node = if let Some(x) = *watcher.owner.borrow() {
+            x
+        } else {
+            return Weak::new();
+        };
+
+        if let Some(next_watcher) = unsafe { &node.as_ref().next } {
+            unsafe { Arc::downgrade(&next_watcher.as_ref().watcher) }
+        } else {
+            Weak::new()
+        }
+    }
+
+    #[inline]
+    #[allow(unused)]
+    fn prev_watcher(&self) -> Weak<NodeWatcher<T>> {
+        let watcher = if let Some(x) = self.node.upgrade() {
+            x
+        } else {
+            return Weak::new();
+        };
+
+        let node = if let Some(x) = *watcher.owner.borrow() {
+            x
+        } else {
+            return Weak::new();
+        };
+
+        if let Some(prev_watcher) = unsafe { &node.as_ref().prev } {
+            unsafe { Arc::downgrade(&prev_watcher.as_ref().watcher) }
+        } else {
+            Weak::new()
+        }
+    }
+
+    pub fn as_ref(&self) -> Option<LinkedListItem<T>> {
+        let watcher = self.node.upgrade()?;
+        let node = (*watcher.owner.borrow())?;
+
+        let ret = unsafe { node.as_ref().element.clone() };
+        Some(ret)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        check_iter_mut_valid(self)
+    }
+}
 
 impl<T> LinkedList<T> {
     /// Unlinks the specified node from the current list.
@@ -483,21 +680,6 @@ impl<T> LinkedList<T> {
     /// Removes all elements from the `LinkedList`.
     ///
     /// This operation should compute in *O*(*n*) time.
-    ///
-    /// # Examples
-    ///
-    /// ```
-    /// use atlist::LinkedList;
-    ///
-    /// let mut dl = LinkedList::new();
-    /// dl.put(1);
-    /// dl.put(2);
-    /// dl.put(3);
-    /// assert_eq!(dl.len(), 3);
-    ///
-    /// dl.clear();
-    /// assert_eq!(dl.len(), 0);
-    /// assert_eq!(dl.front().is_none());
     #[inline]
     pub fn clear(&mut self) {
         *self = Self::new();
@@ -506,6 +688,19 @@ impl<T> LinkedList<T> {
     #[inline]
     pub fn iter(&self) -> Iter<T> {
         self.iter_front()
+    }
+
+    #[inline]
+    pub fn iter_mut(&mut self) -> IterMut<T> {
+        self.iter_mut_front()
+    }
+
+    #[inline]
+    fn iter_inner(&self) -> IterInner<'_, T> {
+        IterInner {
+            node: self.head,
+            marker: PhantomData,
+        }
     }
 
     #[inline]
@@ -523,6 +718,24 @@ impl<T> LinkedList<T> {
             Iter::from(unsafe { tail.as_ref() })
         } else {
             Iter::new()
+        }
+    }
+
+    #[inline]
+    pub fn iter_mut_front(&mut self) -> IterMut<T> {
+        if let Some(ref head) = self.head {
+            IterMut::from(unsafe { head.as_ref() })
+        } else {
+            IterMut::new()
+        }
+    }
+
+    #[inline]
+    pub fn iter_mut_back(&mut self) -> IterMut<T> {
+        if let Some(ref tail) = self.tail {
+            IterMut::from(unsafe { tail.as_ref() })
+        } else {
+            IterMut::new()
         }
     }
 
@@ -587,6 +800,20 @@ impl<T> LinkedList<T> {
     }
 
     #[inline]
+    fn check_container_mut(&self, x: &IterMut<T>) -> (bool, Option<Arc<NodeWatcher<T>>>) {
+        let node = if let Some(y) = x.node.upgrade() {
+            y
+        } else {
+            return (false, None);
+        };
+
+        (
+            unsafe { ptr::eq(node.container.as_ref(), self) },
+            Some(node),
+        )
+    }
+
+    #[inline]
     pub fn contains_iter(&self, x: &Iter<T>) -> bool {
         if !self.check_container(&x).0 {
             return false;
@@ -615,8 +842,8 @@ impl<T> LinkedList<T> {
     /// If the cursor is pointing at the "ghost" non-element then the new element is
     /// inserted at the end of the `LinkedList`.
     #[inline]
-    pub fn insert_before(&mut self, iter: &mut Iter<T>, elt: T) -> LinkedListResult<Iter<T>> {
-        let (check_container, p) = self.check_container(&iter);
+    pub fn insert_before(&mut self, iter: &IterMut<T>, elt: T) -> LinkedListResult<Iter<T>> {
+        let (check_container, p) = self.check_container_mut(&iter);
 
         if !check_container && p.is_none() {
             self.push_back(elt);
@@ -648,8 +875,8 @@ impl<T> LinkedList<T> {
     /// If the cursor is pointing at the "ghost" non-element then the new element is
     /// inserted at the front of the `LinkedList`.
     #[inline]
-    pub fn insert_after(&mut self, iter: &mut Iter<T>, elt: T) -> LinkedListResult<Iter<T>> {
-        let (check_container, p) = self.check_container(&iter);
+    pub fn insert_after(&mut self, iter: &IterMut<T>, elt: T) -> LinkedListResult<Iter<T>> {
+        let (check_container, p) = self.check_container_mut(&iter);
 
         if !check_container && p.is_none() {
             self.push_front(elt);
@@ -740,9 +967,140 @@ impl<T> IntoIterator for &LinkedList<T> {
     }
 }
 
+impl<T> IntoIterator for &mut LinkedList<T> {
+    type Item = LinkedListItem<T>;
+    type IntoIter = IterMut<T>;
+
+    fn into_iter(self) -> IterMut<T> {
+        self.iter_mut()
+    }
+}
+
 impl<T> Extend<T> for LinkedList<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
         iter.into_iter().for_each(move |elt| self.push_back(elt));
+    }
+}
+
+fn _core_cmp_op_eq_list<T: PartialEq, CF>(
+    left: &LinkedList<T>,
+    right: &LinkedList<T>,
+    mut cmp_op: CF,
+) -> bool
+where
+    CF: FnMut(&RefCell<T>, &RefCell<T>) -> bool,
+{
+    let mut left_iter = left.iter_inner();
+    let mut right_iter = right.iter_inner();
+    loop {
+        loop {
+            let x = match left_iter.next() {
+                None => return right_iter.next().is_none(),
+                Some(val) => val,
+            };
+
+            let y = match right_iter.next() {
+                None => return false,
+                Some(val) => val,
+            };
+
+            if !cmp_op(x.as_ref(), y.as_ref()) {
+                return false;
+            }
+        }
+    }
+}
+
+impl<T: PartialEq> PartialEq for LinkedList<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && _core_cmp_op_eq_list(&self, &other, |x, y| x == y)
+    }
+
+    fn ne(&self, other: &Self) -> bool {
+        self.len() != other.len() || !_core_cmp_op_eq_list(&self, &other, |x, y| x == y)
+    }
+}
+
+impl<T: Eq> Eq for LinkedList<T> {}
+
+fn _core_cmp_op_partial_cmp_by_list<T: PartialOrd, CF>(
+    left: &LinkedList<T>,
+    right: &LinkedList<T>,
+    mut partial_cmp: CF,
+) -> Option<Ordering>
+where
+    CF: FnMut(&RefCell<T>, &RefCell<T>) -> Option<Ordering>,
+{
+    let mut left_iter = left.iter_inner();
+    let mut right_iter = right.iter_inner();
+    loop {
+        let x = match left_iter.next() {
+            None => {
+                if right_iter.next().is_none() {
+                    return Some(Ordering::Equal);
+                } else {
+                    return Some(Ordering::Less);
+                }
+            }
+            Some(val) => val,
+        };
+
+        let y = match right_iter.next() {
+            None => return Some(Ordering::Greater),
+            Some(val) => val,
+        };
+
+        match partial_cmp(x, y) {
+            Some(Ordering::Equal) => (),
+            non_eq => return non_eq,
+        }
+    }
+}
+
+impl<T: PartialOrd> PartialOrd for LinkedList<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        _core_cmp_op_partial_cmp_by_list(&self, &other, |x, y| x.partial_cmp(y))
+    }
+}
+
+fn _core_cmp_op_cmp_by_list<T: Ord, CF>(
+    left: &LinkedList<T>,
+    right: &LinkedList<T>,
+    mut cmp_op: CF,
+) -> Ordering
+where
+    CF: FnMut(&RefCell<T>, &RefCell<T>) -> Ordering,
+{
+    let mut left_iter = left.iter_inner();
+    let mut right_iter = right.iter_inner();
+    loop {
+        let x = match left_iter.next() {
+            None => {
+                if right_iter.next().is_none() {
+                    return Ordering::Equal;
+                } else {
+                    return Ordering::Less;
+                }
+            }
+            Some(val) => val,
+        };
+
+        let y = match right_iter.next() {
+            None => return Ordering::Greater,
+            Some(val) => val,
+        };
+
+        match cmp_op(x, y) {
+            Ordering::Equal => (),
+            non_eq => return non_eq,
+        }
+    }
+}
+
+impl<T: Ord> Ord for LinkedList<T> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        _core_cmp_op_cmp_by_list(&self, &other, |x, y| x.cmp(y))
     }
 }
 
@@ -772,7 +1130,124 @@ impl<T: Clone> Clone for LinkedList<T> {
     }
 }
 
-unsafe impl<T: Send> Send for LinkedList<T> {}
+impl<T: fmt::Debug> fmt::Debug for LinkedList<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self).finish()
+    }
+}
+
+impl<T: Hash> Hash for LinkedList<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.len().hash(state);
+        let mut iter = self.iter_inner();
+        while let Some(x) = iter.next() {
+            unsafe { &*x.as_ref().as_ptr() }.hash(state);
+        }
+    }
+}
+
+fn _core_cmp_op_weak<T: PartialEq, CF, EF, R>(
+    left: &Weak<NodeWatcher<T>>,
+    right: &Weak<NodeWatcher<T>>,
+    mut cmp_op: CF,
+    mut eq_op: EF,
+) -> R
+where
+    CF: FnMut(&RefCell<T>, &RefCell<T>) -> R,
+    EF: FnMut() -> Option<R>,
+{
+    if Weak::ptr_eq(&left, &right) {
+        if let Some(r) = eq_op() {
+            return r;
+        }
+    }
+
+    let left_ptr = left.upgrade();
+    let right_ptr = right.upgrade();
+
+    if left_ptr.is_none() && right_ptr.is_none() {
+        if let Some(r) = eq_op() {
+            return r;
+        }
+    }
+
+    let left_ptr = left_ptr.unwrap();
+    let right_ptr = right_ptr.unwrap();
+
+    let left_node = left_ptr.as_ref().owner.borrow().unwrap();
+    let right_node = right_ptr.as_ref().owner.borrow().unwrap();
+
+    cmp_op(
+        unsafe { left_node.as_ref() }.element.as_ref(),
+        unsafe { right_node.as_ref() }.element.as_ref(),
+    )
+}
+
+#[inline]
+fn _core_cmp_eq_weak<T: PartialEq>(
+    left: &Weak<NodeWatcher<T>>,
+    right: &Weak<NodeWatcher<T>>,
+) -> bool {
+    _core_cmp_op_weak(left, right, |x, y| x == y, || Some(true))
+}
+
+impl<T: PartialEq> PartialEq for Iter<T> {
+    fn eq(&self, other: &Self) -> bool {
+        _core_cmp_eq_weak(&self.node, &other.node)
+    }
+}
+
+impl<T: PartialEq> PartialEq<IterMut<T>> for Iter<T> {
+    fn eq(&self, other: &IterMut<T>) -> bool {
+        _core_cmp_eq_weak(&self.node, &other.node)
+    }
+}
+
+impl<T: PartialEq> Eq for Iter<T> {}
+
+impl<T: PartialEq> PartialEq for IterMut<T> {
+    fn eq(&self, other: &Self) -> bool {
+        _core_cmp_eq_weak(&self.node, &other.node)
+    }
+}
+
+impl<T: PartialEq> PartialEq<Iter<T>> for IterMut<T> {
+    fn eq(&self, other: &Iter<T>) -> bool {
+        _core_cmp_eq_weak(&self.node, &other.node)
+    }
+}
+
+impl<T: PartialEq> Eq for IterMut<T> {}
+
+impl<T> From<&Iter<T>> for IterMut<T> {
+    fn from(iter: &Iter<T>) -> IterMut<T> {
+        IterMut::from_weak(iter.node.clone())
+    }
+}
+
+impl<T> From<Iter<T>> for IterMut<T> {
+    fn from(iter: Iter<T>) -> IterMut<T> {
+        IterMut::from_weak(iter.node)
+    }
+}
+
+impl<T> From<&IterMut<T>> for Iter<T> {
+    fn from(iter: &IterMut<T>) -> Iter<T> {
+        Iter::from_weak(iter.node.clone())
+    }
+}
+
+impl<T> From<IterMut<T>> for Iter<T> {
+    fn from(iter: IterMut<T>) -> Iter<T> {
+        Iter::from_weak(iter.node)
+    }
+}
+
+unsafe impl<T> Send for LinkedList<T> {}
 unsafe impl<T: Sync> Sync for LinkedList<T> {}
-unsafe impl<T: Sync> Send for Iter<T> {}
+unsafe impl<T> Send for Iter<T> {}
 unsafe impl<T: Sync> Sync for Iter<T> {}
+unsafe impl<T> Send for IterMut<T> {}
+unsafe impl<T: Sync> Sync for IterMut<T> {}
+unsafe impl<'a, T: Send> Send for IterInner<'a, T> {}
+unsafe impl<'a, T: Sync> Sync for IterInner<'a, T> {}
