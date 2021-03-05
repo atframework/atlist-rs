@@ -31,6 +31,7 @@
 //#![no_std]
 #![cfg_attr(feature = "nightly", feature(negative_impls, auto_traits))]
 
+use core::cmp::Ordering;
 use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::iter::{Extend, FromIterator, FusedIterator};
@@ -41,7 +42,7 @@ use core::ptr;
 use core::ptr::NonNull;
 use core::result::Result;
 use core::usize;
-use std::error::Error;
+use std::{borrow::BorrowMut, error::Error};
 use std::{
     ops::Deref,
     sync::{Arc, PoisonError, RwLock, TryLockError, Weak},
@@ -53,6 +54,7 @@ use std::{
 #[cfg(test)]
 mod tests;
 
+#[derive(PartialEq, PartialOrd, Eq, Ord)]
 pub enum LinkedListError {
     /// Try mutex lock failed
     TryLockError(String),
@@ -117,20 +119,19 @@ impl<'a, T> From<TryLockError<T>> for LinkedListError {
 }
 
 pub type LinkedListResult<T> = Result<T, LinkedListError>;
-pub type LinkedListItem<T> = Arc<RwLock<T>>;
+pub type LinkedListItem<T> = Arc<T>;
 type Node<T> = Arc<RwLock<NodeEntry<T>>>;
 
 struct NodeEntry<T> {
     next: Option<NonNull<Node<T>>>,
     prev: Option<NonNull<Node<T>>>,
-    element: LinkedListItem<T>,
-    container: NonNull<UnmoveableLinkedList<T>>,
+    element: Option<LinkedListItem<T>>,
+    end: Weak<RwLock<NodeEntry<T>>>,
     leak: Option<NonNull<Node<T>>>,
 }
 
 struct UnmoveableLinkedList<T> {
-    head: Option<NonNull<Node<T>>>,
-    tail: Option<NonNull<Node<T>>>,
+    end: Node<T>,
     len: usize,
 }
 
@@ -140,10 +141,12 @@ pub struct LinkedList<T> {
 
 pub struct Iter<T> {
     node: Weak<RwLock<NodeEntry<T>>>,
+    last_back: bool,
 }
 
 pub struct IterMut<T> {
     node: Weak<RwLock<NodeEntry<T>>>,
+    last_back: bool,
 }
 
 fn check_iter_valid<T>(iter: &Iter<T>) -> bool {
@@ -157,7 +160,7 @@ fn check_iter_mut_valid<T>(iter: &IterMut<T>) -> bool {
 impl<T> NodeEntry<T> {
     #[inline]
     fn new(elt: T, container: &mut Pin<Box<UnmoveableLinkedList<T>>>) -> Box<Node<T>> {
-        NodeEntry::from(Arc::new(RwLock::new(elt)), container)
+        NodeEntry::from(Arc::new(elt), container)
     }
 
     fn from(
@@ -168,12 +171,25 @@ impl<T> NodeEntry<T> {
         let ret = NodeEntry {
             next: None,
             prev: None,
-            element: elt,
-            container: unsafe { NonNull::new_unchecked(container) },
+            element: Some(elt),
+            end: Arc::downgrade(&container.end),
             leak: None,
         };
 
         Box::new(Arc::new(RwLock::new(ret)))
+    }
+
+    #[inline]
+    fn uninited_new() -> Node<T> {
+        let ret = NodeEntry {
+            next: None,
+            prev: None,
+            element: None,
+            end: Weak::default(),
+            leak: None,
+        };
+
+        Arc::new(RwLock::new(ret))
     }
 }
 
@@ -187,14 +203,7 @@ impl<T: fmt::Debug> fmt::Debug for Iter<T> {
                 }
             };
 
-            let current_element = match current_node.element.read() {
-                Ok(x) => x,
-                Err(e) => {
-                    return write!(f, "Iter Element: Locked: {:?}", e);
-                }
-            };
-
-            f.debug_tuple("Iter").field(&current_element).finish()
+            f.debug_tuple("Iter").field(&current_node.element).finish()
         } else {
             f.debug_tuple("Iter: Empty").finish()
         }
@@ -205,6 +214,7 @@ impl<T> Clone for Iter<T> {
     fn clone(&self) -> Self {
         Iter {
             node: self.node.clone(),
+            last_back: false,
         }
     }
 }
@@ -219,14 +229,9 @@ impl<T: fmt::Debug> fmt::Debug for IterMut<T> {
                 }
             };
 
-            let current_element = match current_node.element.read() {
-                Ok(x) => x,
-                Err(e) => {
-                    return write!(f, "IterMut Element: Locked: {:?}", e);
-                }
-            };
-
-            f.debug_tuple("IterMut").field(&current_element).finish()
+            f.debug_tuple("IterMut")
+                .field(&current_node.element)
+                .finish()
         } else {
             f.debug_tuple("IterMut: Empty").finish()
         }
@@ -245,16 +250,19 @@ impl<T> Iterator for Iter<T> {
             }
         };
 
-        let ret = node.element.clone();
+        if !self.last_back && node.element.is_none() {
+            return None;
+        }
 
         let next_node = if let Some(next_watcher) = node.next {
             unsafe { Arc::downgrade(next_watcher.as_ref()) }
         } else {
-            Weak::new()
+            node.end.clone()
         };
-
         self.node = next_node;
-        Some(ret)
+        self.last_back = false;
+
+        node.element.clone()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -282,16 +290,19 @@ impl<T> Iterator for IterMut<T> {
             }
         };
 
-        let ret = node.element.clone();
+        if !self.last_back && node.element.is_none() {
+            return None;
+        }
 
         let next_node = if let Some(next_watcher) = node.next {
             unsafe { Arc::downgrade(next_watcher.as_ref()) }
         } else {
-            Weak::new()
+            node.end.clone()
         };
-
         self.node = next_node;
-        Some(ret)
+        self.last_back = false;
+
+        node.element.clone()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -318,16 +329,19 @@ impl<T> DoubleEndedIterator for Iter<T> {
             }
         };
 
-        let ret = node.element.clone();
+        if self.last_back && node.element.is_none() {
+            return None;
+        }
 
         let prev_node = if let Some(prev_watcher) = node.prev {
             unsafe { Arc::downgrade(prev_watcher.as_ref()) }
         } else {
-            Weak::new()
+            node.end.clone()
         };
-
         self.node = prev_node;
-        Some(ret)
+        self.last_back = true;
+
+        node.element.clone()
     }
 }
 
@@ -342,16 +356,19 @@ impl<T> DoubleEndedIterator for IterMut<T> {
             }
         };
 
-        let ret = node.element.clone();
+        if self.last_back && node.element.is_none() {
+            return None;
+        }
 
         let prev_node = if let Some(prev_watcher) = node.prev {
             unsafe { Arc::downgrade(prev_watcher.as_ref()) }
         } else {
-            Weak::new()
+            node.end.clone()
         };
-
         self.node = prev_node;
-        Some(ret)
+        self.last_back = true;
+
+        node.element.clone()
     }
 }
 
@@ -360,17 +377,24 @@ impl<T> FusedIterator for IterMut<T> {}
 
 impl<T> Iter<T> {
     fn new() -> Iter<T> {
-        Iter { node: Weak::new() }
+        Iter {
+            node: Weak::new(),
+            last_back: false,
+        }
     }
 
     fn from(node: &Node<T>) -> Iter<T> {
         Iter {
             node: Arc::downgrade(&node),
+            last_back: false,
         }
     }
 
     fn from_weak(node: Weak<RwLock<NodeEntry<T>>>) -> Iter<T> {
-        Iter { node: node }
+        Iter {
+            node: node,
+            last_back: false,
+        }
     }
 
     pub fn try_unwrap(&self) -> LinkedListResult<LinkedListItem<T>> {
@@ -381,7 +405,11 @@ impl<T> Iter<T> {
         };
 
         let guard = watcher.read()?;
-        let ret = guard.element.clone();
+        if guard.element.is_none() {
+            return Err(LinkedListError::IteratorNotInList);
+        }
+
+        let ret = guard.element.as_ref().unwrap().clone();
         drop(guard);
         Ok(ret)
     }
@@ -397,17 +425,24 @@ impl<T> Iter<T> {
 
 impl<T> IterMut<T> {
     fn new() -> IterMut<T> {
-        IterMut { node: Weak::new() }
+        IterMut {
+            node: Weak::new(),
+            last_back: false,
+        }
     }
 
     fn from(node: &Node<T>) -> IterMut<T> {
         IterMut {
             node: Arc::downgrade(&node),
+            last_back: false,
         }
     }
 
     fn from_weak(node: Weak<RwLock<NodeEntry<T>>>) -> IterMut<T> {
-        IterMut { node: node }
+        IterMut {
+            node: node,
+            last_back: false,
+        }
     }
 
     pub fn try_unwrap(&self) -> LinkedListResult<LinkedListItem<T>> {
@@ -418,7 +453,11 @@ impl<T> IterMut<T> {
         };
 
         let guard = watcher.read()?;
-        let ret = guard.element.clone();
+        if guard.element.is_none() {
+            return Err(LinkedListError::IteratorNotInList);
+        }
+
+        let ret = guard.element.as_ref().unwrap().clone();
         drop(guard);
         Ok(ret)
     }
@@ -434,6 +473,7 @@ impl<T> IterMut<T> {
 
 #[doc(hidden)]
 struct LinkedListCheckContainerResult<T> {
+    current_is_end: bool,
     current: NonNull<Node<T>>,
     prev: Option<NonNull<Node<T>>>,
     next: Option<NonNull<Node<T>>>,
@@ -455,6 +495,10 @@ impl<T> UnmoveableLinkedList<T> {
             return Err(LinkedListError::BadData);
         }
 
+        if node.element.is_none() {
+            return Err(LinkedListError::IteratorNotInList);
+        }
+
         if node.prev == node.next {
             let mut prev_next_node = if let Some(x) = &node.prev {
                 Some(unsafe { x.as_ref() }.write()?)
@@ -468,8 +512,8 @@ impl<T> UnmoveableLinkedList<T> {
                     prev_next.prev = node.prev;
                 }
                 None => {
-                    self.head = node.next;
-                    self.tail = node.next;
+                    self.set_head(node.next);
+                    self.set_tail(node.next);
                 }
             };
         } else {
@@ -487,13 +531,13 @@ impl<T> UnmoveableLinkedList<T> {
 
             match &mut prev_node {
                 Some(prev) => prev.next = node.next,
-                None => self.head = node.next,
+                None => self.set_head(node.next),
             };
 
             match &mut next_node {
                 Some(next) => next.prev = node.prev,
                 // this node is the tail node
-                None => self.tail = node.prev,
+                None => self.set_tail(node.prev),
             };
         }
 
@@ -505,7 +549,7 @@ impl<T> UnmoveableLinkedList<T> {
         node.next = None;
         node.leak = None;
 
-        let ret = node.element.clone();
+        let ret = node.element.as_ref().unwrap().clone();
 
         drop(node);
         drop(unlinked_node);
@@ -546,8 +590,8 @@ impl<T> UnmoveableLinkedList<T> {
                 prev_next.next = Some(leak_node);
                 prev_next.prev = Some(leak_node);
             } else {
-                self.head = Some(leak_node);
-                self.tail = Some(leak_node);
+                self.set_head(Some(leak_node));
+                self.set_tail(Some(leak_node));
             }
 
             lock_node.leak = Some(leak_node);
@@ -569,12 +613,12 @@ impl<T> UnmoveableLinkedList<T> {
             if let Some(prev) = &mut prev_node {
                 prev.next = Some(leak_node);
             } else {
-                self.head = Some(leak_node);
+                self.set_head(Some(leak_node));
             }
             if let Some(next) = &mut next_node {
                 next.prev = Some(leak_node);
             } else {
-                self.tail = Some(leak_node);
+                self.set_tail(Some(leak_node));
             }
         }
 
@@ -595,7 +639,7 @@ impl<T> UnmoveableLinkedList<T> {
         let node_rc = node.as_ref().clone();
         let mut lock_node = node_rc.write()?;
 
-        let head_node_rc = match &self.head {
+        let head_node_rc = match self.get_head() {
             None => None,
             Some(head) => Some(unsafe { head.as_ref() }.clone()),
         };
@@ -605,16 +649,16 @@ impl<T> UnmoveableLinkedList<T> {
             Some(head) => Some(head.write()?),
         };
 
-        lock_node.next = self.head;
+        lock_node.next = self.get_head();
         lock_node.prev = None;
         lock_node.leak = Some(Box::leak(node).into());
 
         match head_node {
-            None => self.tail = lock_node.leak,
+            None => self.set_tail(lock_node.leak),
             Some(mut head) => head.prev = lock_node.leak,
         }
 
-        self.head = lock_node.leak;
+        self.set_head(lock_node.leak);
         self.len += 1;
 
         Ok(())
@@ -625,12 +669,16 @@ impl<T> UnmoveableLinkedList<T> {
     fn pop_front_node(&mut self) -> LinkedListResult<Box<Node<T>>> {
         // This method takes care not to create mutable references to whole nodes,
         // to maintain validity of aliasing pointers into `element`.
-        if self.head.is_none() {
+        let head_nonull = self.get_head();
+        if head_nonull.is_none() {
             return Err(LinkedListError::Empty);
         }
 
-        let node = self.head.clone().unwrap();
+        let node = head_nonull.unwrap();
         let mut head_node = unsafe { node.as_ref() }.write()?;
+        if head_node.element.is_none() {
+            return Err(LinkedListError::Empty);
+        }
 
         let next_node_rc = match head_node.next {
             None => None,
@@ -647,12 +695,12 @@ impl<T> UnmoveableLinkedList<T> {
         }
 
         let ret = unsafe { Box::from_raw(head_node.leak.unwrap().as_ptr()) };
-        self.head = head_node.next;
+        self.set_head(head_node.next);
         head_node.next = None;
         head_node.leak = None;
 
         match next_node {
-            None => self.tail = None,
+            None => self.set_tail(None),
             Some(mut next) => next.prev = None,
         }
 
@@ -669,7 +717,7 @@ impl<T> UnmoveableLinkedList<T> {
         let node_rc = node.as_ref().clone();
         let mut lock_node = node_rc.write()?;
 
-        let tail_node_rc = match &self.tail {
+        let tail_node_rc = match self.get_tail() {
             None => None,
             Some(tail) => Some(unsafe { tail.as_ref() }.clone()),
         };
@@ -680,15 +728,15 @@ impl<T> UnmoveableLinkedList<T> {
         };
 
         lock_node.next = None;
-        lock_node.prev = self.tail;
+        lock_node.prev = self.get_tail();
         lock_node.leak = Some(Box::leak(node).into());
 
         match tail_node {
-            None => self.head = lock_node.leak,
+            None => self.set_head(lock_node.leak),
             Some(mut tail) => tail.next = lock_node.leak,
         }
 
-        self.tail = lock_node.leak;
+        self.set_tail(lock_node.leak);
         self.len += 1;
 
         Ok(())
@@ -699,13 +747,16 @@ impl<T> UnmoveableLinkedList<T> {
     fn pop_back_node(&mut self) -> LinkedListResult<Box<Node<T>>> {
         // This method takes care not to create mutable references to whole nodes,
         // to maintain validity of aliasing pointers into `element`.
-
-        if self.tail.is_none() {
+        let tail_nonull = self.get_tail();
+        if tail_nonull.is_none() {
             return Err(LinkedListError::Empty);
         }
 
-        let node = self.tail.clone().unwrap();
+        let node = tail_nonull.unwrap();
         let mut tail_node = unsafe { node.as_ref() }.write()?;
+        if tail_node.element.is_none() {
+            return Err(LinkedListError::Empty);
+        }
 
         let prev_node_rc = match tail_node.prev {
             None => None,
@@ -721,12 +772,12 @@ impl<T> UnmoveableLinkedList<T> {
         }
 
         let ret = unsafe { Box::from_raw(tail_node.leak.unwrap().as_ptr()) };
-        self.tail = tail_node.prev;
+        self.set_tail(tail_node.prev);
         tail_node.prev = None;
         tail_node.leak = None;
 
         match prev_node {
-            None => self.head = None,
+            None => self.set_head(None),
             Some(mut prev) => prev.next = None,
         }
 
@@ -737,15 +788,12 @@ impl<T> UnmoveableLinkedList<T> {
 
     #[inline]
     fn check_container(&self, x: &NodeEntry<T>) -> Option<LinkedListCheckContainerResult<T>> {
-        if unsafe {
-            let left: *const UnmoveableLinkedList<T> = x.container.as_ref();
-            let right: *const UnmoveableLinkedList<T> = self;
-            ptr::eq(left, right)
-        } {
+        if ptr::eq(x.end.as_ptr(), Arc::as_ptr(&self.end)) {
             x.leak.map(|y| LinkedListCheckContainerResult {
                 next: x.next,
                 prev: x.prev,
                 current: y,
+                current_is_end: x.element.is_none(),
             })
         } else {
             None
@@ -791,6 +839,54 @@ impl<T> UnmoveableLinkedList<T> {
     }
 }
 
+impl<T> UnmoveableLinkedList<T> {
+    #[inline]
+    fn new() -> Pin<Box<Self>> {
+        let res = UnmoveableLinkedList {
+            end: NodeEntry::uninited_new(),
+            len: 0,
+        };
+
+        let mut boxed = Box::pin(res);
+        let container = unsafe { Pin::get_unchecked_mut(boxed.as_mut()) };
+        let container = unsafe { NonNull::new_unchecked(container) };
+        let mut guard = boxed.end.write().unwrap();
+
+        guard.borrow_mut().end = Arc::downgrade(&unsafe { container.as_ref() }.end);
+        drop(guard);
+
+        boxed
+    }
+
+    #[inline]
+    fn get_head(&self) -> Option<NonNull<Node<T>>> {
+        if let Ok(guard) = self.end.read() {
+            guard.next
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn get_tail(&self) -> Option<NonNull<Node<T>>> {
+        if let Ok(guard) = self.end.read() {
+            guard.prev
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn set_head(&mut self, v: Option<NonNull<Node<T>>>) {
+        self.end.write().unwrap().next = v;
+    }
+
+    #[inline]
+    fn set_tail(&self, v: Option<NonNull<Node<T>>>) {
+        self.end.write().unwrap().prev = v;
+    }
+}
+
 impl<T> LinkedList<T> {
     #[inline]
     fn data_mut(&mut self) -> &mut UnmoveableLinkedList<T> {
@@ -799,15 +895,9 @@ impl<T> LinkedList<T> {
 
     #[inline]
     pub fn new() -> Self {
-        let res = UnmoveableLinkedList {
-            head: None,
-            tail: None,
-            len: 0,
-        };
+        let data = UnmoveableLinkedList::new();
 
-        let boxed = Box::pin(res);
-
-        LinkedList { data: boxed }
+        LinkedList { data: data }
     }
 
     #[inline]
@@ -840,7 +930,7 @@ impl<T> LinkedList<T> {
 
     #[inline]
     pub fn iter_front(&self) -> Iter<T> {
-        if let Some(ref head) = self.data.head {
+        if let Some(head) = self.data.get_head() {
             Iter::from(unsafe { head.as_ref() })
         } else {
             Iter::new()
@@ -849,7 +939,7 @@ impl<T> LinkedList<T> {
 
     #[inline]
     pub fn iter_back(&self) -> Iter<T> {
-        if let Some(ref tail) = self.data.tail {
+        if let Some(tail) = self.data.get_tail() {
             Iter::from(unsafe { tail.as_ref() })
         } else {
             Iter::new()
@@ -858,7 +948,7 @@ impl<T> LinkedList<T> {
 
     #[inline]
     pub fn iter_mut_front(&mut self) -> IterMut<T> {
-        if let Some(ref head) = self.data.head {
+        if let Some(head) = self.data.get_head() {
             IterMut::from(unsafe { head.as_ref() })
         } else {
             IterMut::new()
@@ -867,7 +957,7 @@ impl<T> LinkedList<T> {
 
     #[inline]
     pub fn iter_mut_back(&mut self) -> IterMut<T> {
-        if let Some(ref tail) = self.data.tail {
+        if let Some(tail) = self.data.get_tail() {
             IterMut::from(unsafe { tail.as_ref() })
         } else {
             IterMut::new()
@@ -889,7 +979,10 @@ impl<T> LinkedList<T> {
     pub fn pop_front(&mut self) -> LinkedListResult<LinkedListItem<T>> {
         let n = self.data_mut().pop_front_node()?;
         let ret = n.read()?;
-        Ok(ret.element.clone())
+        if ret.element.is_none() {
+            return Err(LinkedListError::IteratorNotInList);
+        }
+        Ok(ret.element.as_ref().unwrap().clone())
     }
 
     /// Appends an element to the back of a list.
@@ -907,18 +1000,21 @@ impl<T> LinkedList<T> {
     pub fn pop_back(&mut self) -> LinkedListResult<LinkedListItem<T>> {
         let n = self.data_mut().pop_back_node()?;
         let ret = n.read()?;
-        Ok(ret.element.clone())
+        if ret.element.is_none() {
+            return Err(LinkedListError::IteratorNotInList);
+        }
+        Ok(ret.element.as_ref().unwrap().clone())
     }
 
     /// Provides a reference to the front element, or `None` if the list is
     /// empty.
     #[inline]
     pub fn front(&self) -> LinkedListResult<LinkedListItem<T>> {
-        if let Some(head) = self.data.head {
+        if let Some(head) = self.data.get_head() {
             unsafe { head.as_ref() }
                 .read()
                 .map_err(|x| x.into())
-                .map(|x| x.element.clone())
+                .map(|x| x.element.as_ref().unwrap().clone())
         } else {
             Err(LinkedListError::Empty)
         }
@@ -928,11 +1024,11 @@ impl<T> LinkedList<T> {
     /// empty.
     #[inline]
     pub fn back(&self) -> LinkedListResult<LinkedListItem<T>> {
-        if let Some(tail) = self.data.tail {
+        if let Some(tail) = self.data.get_tail() {
             unsafe { tail.as_ref() }
                 .read()
                 .map_err(|x| x.into())
-                .map(|x| x.element.clone())
+                .map(|x| x.element.as_ref().unwrap().clone())
         } else {
             Err(LinkedListError::Empty)
         }
@@ -955,6 +1051,11 @@ impl<T> LinkedList<T> {
     #[inline]
     pub fn insert_before(&mut self, iter: &IterMut<T>, elt: T) -> LinkedListResult<IterMut<T>> {
         let current = self.data.contains_iter_mut(&iter)?;
+        if current.current_is_end {
+            self.push_back(elt)?;
+            return Ok(self.iter_mut_back());
+        }
+
         let new_node = NodeEntry::new(elt, &mut self.data);
 
         self.data_mut()
@@ -968,6 +1069,11 @@ impl<T> LinkedList<T> {
     #[inline]
     pub fn insert_after(&mut self, iter: &IterMut<T>, elt: T) -> LinkedListResult<IterMut<T>> {
         let current = self.data.contains_iter_mut(&iter)?;
+        if current.current_is_end {
+            self.push_front(elt)?;
+            return Ok(self.iter_mut_front());
+        }
+
         let new_node = NodeEntry::new(elt, &mut self.data);
 
         self.data_mut()
@@ -1040,23 +1146,31 @@ impl<T> Extend<T> for LinkedList<T> {
             let _ = self.push_back(elt);
         });
     }
+
+    #[cfg(feature = "nightly")]
+    #[inline]
+    fn extend_one(&mut self, elem: T) {
+        let _ = self.push_back(elem);
+    }
+}
+
+impl<'a, T: 'a + Copy> Extend<&'a T> for LinkedList<T> {
+    fn extend<I: IntoIterator<Item = &'a T>>(&mut self, iter: I) {
+        iter.into_iter().cloned().for_each(move |elt| {
+            let _ = self.push_back(elt);
+        });
+    }
+
+    #[cfg(feature = "nightly")]
+    #[inline]
+    fn extend_one(&mut self, &elem: &'a T) {
+        let _ = self.push_back(elem);
+    }
 }
 
 impl<T: PartialEq> PartialEq for NodeEntry<T> {
     fn eq(&self, other: &Self) -> bool {
-        let x = if let Ok(g) = self.element.try_read() {
-            g
-        } else {
-            return Arc::ptr_eq(&self.element, &other.element);
-        };
-
-        let y = if let Ok(g) = other.element.try_read() {
-            g
-        } else {
-            return Arc::ptr_eq(&self.element, &other.element);
-        };
-
-        x.deref() == y.deref()
+        self.element.as_ref() == other.element.as_ref()
     }
 
     fn ne(&self, other: &Self) -> bool {
@@ -1088,18 +1202,7 @@ where
                 Some(val) => val,
             };
 
-            let x_guard = if let Ok(g) = x.read() {
-                g
-            } else {
-                return false;
-            };
-            let y_guard = if let Ok(g) = y.read() {
-                g
-            } else {
-                return false;
-            };
-
-            if !cmp_op(x_guard.deref(), y_guard.deref()) {
+            if !cmp_op(x.as_ref(), y.as_ref()) {
                 return false;
             }
         }
@@ -1118,16 +1221,92 @@ impl<T: PartialEq> PartialEq for LinkedList<T> {
 
 impl<T: Eq> Eq for LinkedList<T> {}
 
+fn _core_cmp_op_partial_cmp_by_list<T: PartialOrd, CF>(
+    left: &LinkedList<T>,
+    right: &LinkedList<T>,
+    mut partial_cmp: CF,
+) -> Option<Ordering>
+where
+    CF: FnMut(&T, &T) -> Option<Ordering>,
+{
+    let mut left_iter = left.iter();
+    let mut right_iter = right.iter();
+    loop {
+        let x = match left_iter.next() {
+            None => {
+                if right_iter.next().is_none() {
+                    return Some(Ordering::Equal);
+                } else {
+                    return Some(Ordering::Less);
+                }
+            }
+            Some(val) => val,
+        };
+
+        let y = match right_iter.next() {
+            None => return Some(Ordering::Greater),
+            Some(val) => val,
+        };
+
+        match partial_cmp(x.as_ref(), y.as_ref()) {
+            Some(Ordering::Equal) => (),
+            non_eq => return non_eq,
+        }
+    }
+}
+
+impl<T: PartialOrd> PartialOrd for LinkedList<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        _core_cmp_op_partial_cmp_by_list(&self, &other, |x, y| x.partial_cmp(y))
+    }
+}
+
+fn _core_cmp_op_cmp_by_list<T: Ord, CF>(
+    left: &LinkedList<T>,
+    right: &LinkedList<T>,
+    mut cmp_op: CF,
+) -> Ordering
+where
+    CF: FnMut(&T, &T) -> Ordering,
+{
+    let mut left_iter = left.iter();
+    let mut right_iter = right.iter();
+    loop {
+        let x = match left_iter.next() {
+            None => {
+                if right_iter.next().is_none() {
+                    return Ordering::Equal;
+                } else {
+                    return Ordering::Less;
+                }
+            }
+            Some(val) => val,
+        };
+
+        let y = match right_iter.next() {
+            None => return Ordering::Greater,
+            Some(val) => val,
+        };
+
+        match cmp_op(x.as_ref(), y.as_ref()) {
+            Ordering::Equal => (),
+            non_eq => return non_eq,
+        }
+    }
+}
+
+impl<T: Ord> Ord for LinkedList<T> {
+    #[inline]
+    fn cmp(&self, other: &Self) -> Ordering {
+        _core_cmp_op_cmp_by_list(&self, &other, |x, y| x.cmp(y))
+    }
+}
+
 impl<T: Clone> Clone for LinkedList<T> {
     fn clone(&self) -> Self {
         let mut ret = LinkedList::new();
         for elem in self {
-            match elem.read() {
-                Ok(x) => {
-                    let _ = ret.push_back(x.clone());
-                }
-                _ => (),
-            }
+            let _ = ret.push_back(elem.as_ref().clone());
         }
         ret
     }
@@ -1138,22 +1317,14 @@ impl<T: Clone> Clone for LinkedList<T> {
             let _ = self.pop_back();
         }
 
-        for (elem, elem_other) in self.iter().zip(&mut iter_other) {
-            let elem_guard = elem.write();
-            let elem_other_guard = elem_other.read();
-            if elem_guard.is_err() || elem_other_guard.is_err() {
-                continue;
-            }
-            elem_guard.unwrap().clone_from(&elem_other_guard.unwrap());
+        for (elem, elem_other) in self.iter_mut().zip(&mut iter_other) {
+            let dst = unsafe { &mut *(Arc::as_ptr(&elem) as *mut T) };
+
+            dst.clone_from(elem_other.as_ref());
         }
 
         while let Some(elem) = iter_other.next() {
-            match elem.read() {
-                Ok(x) => {
-                    let _ = self.push_back(x.deref().clone());
-                }
-                _ => (),
-            }
+            let _ = self.push_back(elem.deref().clone());
         }
     }
 }
@@ -1168,12 +1339,7 @@ impl<T: Hash> Hash for LinkedList<T> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.len().hash(state);
         for elem in self {
-            match elem.read() {
-                Ok(x) => {
-                    x.hash(state);
-                }
-                _ => (),
-            }
+            elem.as_ref().hash(state);
         }
     }
 }
@@ -1281,9 +1447,9 @@ impl<T> From<IterMut<T>> for Iter<T> {
 }
 
 // unsafe impl<T> !marker::Unpin for UnmoveableLinkedList<T> {}
-unsafe impl<T> marker::Send for UnmoveableLinkedList<T> {}
-unsafe impl<T: marker::Sync> marker::Sync for UnmoveableLinkedList<T> {}
-unsafe impl<T> marker::Send for Iter<T> {}
-unsafe impl<T: marker::Sync> marker::Sync for Iter<T> {}
-unsafe impl<T> marker::Send for IterMut<T> {}
-unsafe impl<T: marker::Sync> marker::Sync for IterMut<T> {}
+unsafe impl<T: marker::Sync + marker::Send> marker::Send for UnmoveableLinkedList<T> {}
+unsafe impl<T: marker::Sync + marker::Send> marker::Sync for UnmoveableLinkedList<T> {}
+unsafe impl<T: marker::Sync + marker::Send> marker::Send for Iter<T> {}
+unsafe impl<T: marker::Sync + marker::Send> marker::Sync for Iter<T> {}
+unsafe impl<T: marker::Sync + marker::Send> marker::Send for IterMut<T> {}
+unsafe impl<T: marker::Sync + marker::Send> marker::Sync for IterMut<T> {}

@@ -1,5 +1,6 @@
 use super::*;
 
+use std::iter::IntoIterator;
 use std::thread;
 use std::vec::Vec;
 
@@ -14,18 +15,21 @@ pub fn check_links<T>(list: &LinkedList<T>) {
         let mut len = 0;
         let mut last_ptr: Option<&Node<T>> = None;
         let mut node_ptr: &Node<T>;
-        match list.data.head {
+        match list.data.get_head() {
             None => {
                 // tail node should also be None.
-                assert!(list.data.tail.is_none());
+                assert!(list.data.get_tail().is_none());
                 assert_eq!(0, list.data.len);
                 return;
             }
             Some(node) => {
                 let left_guard = node.as_ref().read();
-                let left = left_guard.as_ref().unwrap().container.as_ref();
-                let right = &*list.data;
+                assert!(left_guard.as_ref().unwrap().prev.is_none());
+
+                let left = left_guard.as_ref().unwrap().end.as_ptr();
+                let right = Arc::as_ptr(&list.data.end);
                 assert!(ptr::eq(left, right));
+                assert!(!ptr::eq(Arc::as_ptr(node.as_ref()), right));
                 node_ptr = &*node.as_ptr()
             }
         }
@@ -38,27 +42,29 @@ pub fn check_links<T>(list: &LinkedList<T>) {
                 }
                 _ => panic!("prev link is none, not good"),
             }
+
+            len += 1;
             match node_ptr.read().unwrap().next {
                 Some(next) => {
-                    let left_guard = next.as_ref().read();
-                    let left = left_guard.as_ref().unwrap().container.as_ref();
-                    let right = &*list.data;
+                    let left_guard = next.as_ref().read().unwrap();
+                    let left = left_guard.end.as_ptr();
+                    let right = Arc::as_ptr(&list.data.end);
                     assert!(ptr::eq(left, right));
+                    assert!(!ptr::eq(Arc::as_ptr(next.as_ref()), right));
 
                     last_ptr = Some(node_ptr);
                     node_ptr = &*next.as_ptr();
-                    len += 1;
                 }
                 None => {
-                    len += 1;
                     break;
                 }
             }
         }
 
         // verify that the tail node points to the last node.
-        let tail = list.data.tail.as_ref().expect("some tail node").as_ref();
-        assert_eq!(tail as *const Node<T>, node_ptr as *const Node<T>);
+        let tail = list.data.get_tail().expect("some tail node");
+        let tail_ptr = &*tail.as_ptr();
+        assert_eq!(tail_ptr as *const Node<T>, node_ptr as *const Node<T>);
         // check that len matches interior links.
         assert_eq!(len, list.data.len);
     }
@@ -76,7 +82,7 @@ fn test_clone_from() {
         check_links(&m);
         assert_eq!(m, n);
         for elt in u {
-            assert_eq!(*m.pop_front().unwrap().as_ref().read().unwrap(), elt)
+            assert_eq!(*m.pop_front().unwrap().as_ref(), elt)
         }
     }
     // Long cloned from short
@@ -89,7 +95,7 @@ fn test_clone_from() {
         check_links(&m);
         assert_eq!(m, n);
         for elt in u {
-            assert_eq!(*m.pop_front().unwrap().as_ref().read().unwrap(), elt)
+            assert_eq!(*m.pop_front().unwrap().as_ref(), elt)
         }
     }
     // Two equal length lists
@@ -102,9 +108,24 @@ fn test_clone_from() {
         check_links(&m);
         assert_eq!(m, n);
         for elt in u {
-            assert_eq!(*m.pop_front().unwrap().as_ref().read().unwrap(), elt)
+            assert_eq!(*m.pop_front().unwrap().as_ref(), elt)
         }
     }
+}
+
+#[test]
+#[cfg_attr(target_os = "emscripten", ignore)]
+fn test_send() {
+    let n = list_from(&[1, 2, 3]);
+    thread::spawn(move || {
+        check_links(&n);
+        let a: &[_] = &[&1, &2, &3];
+        let b = n.iter().map(|x| *x.as_ref()).collect::<Vec<_>>();
+        assert_eq!(a, &*b.iter().collect::<Vec<_>>());
+    })
+    .join()
+    .ok()
+    .unwrap();
 }
 
 #[test]
@@ -150,7 +171,110 @@ fn fuzz_test(sz: i32) {
     let mut i = 0;
     for (a, &b) in m.into_iter().zip(&v) {
         i += 1;
-        assert_eq!(*a.as_ref().read().unwrap(), b);
+        assert_eq!(*a.as_ref(), b);
     }
     assert_eq!(i, v.len());
+}
+
+#[test]
+fn test_iter_move_peek() {
+    let mut m: LinkedList<u32> = LinkedList::new();
+    let n = [1, 2, 3, 4, 5, 6];
+    m.extend(&n);
+    let mut iter = m.iter();
+    assert_eq!(*iter.unwrap().as_ref(), 1);
+    assert_eq!(*iter.next().unwrap().as_ref(), 1);
+    assert_eq!(*iter.next().unwrap().as_ref(), 2);
+    assert_eq!(*iter.unwrap().as_ref(), 3);
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 3);
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 2);
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 1);
+    assert_eq!(iter.next_back(), None);
+    assert_eq!(iter.try_unwrap(), Err(LinkedListError::IteratorNotInList));
+    assert_eq!(iter.next(), None);
+    assert_eq!(*iter.unwrap().as_ref(), 1);
+
+    /*
+    assert_eq!(iter.current(), None);
+    assert_eq!(iter.peek_next(), Some(&1));
+    assert_eq!(iter.peek_prev(), Some(&6));
+    assert_eq!(iter.index(), None);
+    iter.move_next();
+    iter.move_next();
+    assert_eq!(iter.current(), Some(&2));
+    assert_eq!(iter.peek_next(), Some(&3));
+    assert_eq!(iter.peek_prev(), Some(&1));
+    assert_eq!(iter.index(), Some(1));
+
+    let mut iter = m.cursor_back();
+    assert_eq!(iter.current(), Some(&6));
+    assert_eq!(iter.peek_next(), None);
+    assert_eq!(iter.peek_prev(), Some(&5));
+    assert_eq!(iter.index(), Some(5));
+    iter.move_next();
+    assert_eq!(iter.current(), None);
+    assert_eq!(iter.peek_next(), Some(&1));
+    assert_eq!(iter.peek_prev(), Some(&6));
+    assert_eq!(iter.index(), None);
+    iter.move_prev();
+    iter.move_prev();
+    assert_eq!(iter.current(), Some(&5));
+    assert_eq!(iter.peek_next(), Some(&6));
+    assert_eq!(iter.peek_prev(), Some(&4));
+    assert_eq!(iter.index(), Some(4));
+
+    let mut m: LinkedList<u32> = LinkedList::new();
+    m.extend(&[1, 2, 3, 4, 5, 6]);
+    let mut iter = m.cursor_front_mut();
+    assert_eq!(iter.current(), Some(&mut 1));
+    assert_eq!(iter.peek_next(), Some(&mut 2));
+    assert_eq!(iter.peek_prev(), None);
+    assert_eq!(iter.index(), Some(0));
+    iter.move_prev();
+    assert_eq!(iter.current(), None);
+    assert_eq!(iter.peek_next(), Some(&mut 1));
+    assert_eq!(iter.peek_prev(), Some(&mut 6));
+    assert_eq!(iter.index(), None);
+    iter.move_next();
+    iter.move_next();
+    assert_eq!(iter.current(), Some(&mut 2));
+    assert_eq!(iter.peek_next(), Some(&mut 3));
+    assert_eq!(iter.peek_prev(), Some(&mut 1));
+    assert_eq!(iter.index(), Some(1));
+    let mut cursor2 = iter.as_cursor();
+    assert_eq!(cursor2.current(), Some(&2));
+    assert_eq!(cursor2.index(), Some(1));
+    cursor2.move_next();
+    assert_eq!(cursor2.current(), Some(&3));
+    assert_eq!(cursor2.index(), Some(2));
+    assert_eq!(iter.current(), Some(&mut 2));
+    assert_eq!(iter.index(), Some(1));
+
+    let mut m: LinkedList<u32> = LinkedList::new();
+    m.extend(&[1, 2, 3, 4, 5, 6]);
+    let mut iter = m.cursor_back_mut();
+    assert_eq!(iter.current(), Some(&mut 6));
+    assert_eq!(iter.peek_next(), None);
+    assert_eq!(iter.peek_prev(), Some(&mut 5));
+    assert_eq!(iter.index(), Some(5));
+    iter.move_next();
+    assert_eq!(iter.current(), None);
+    assert_eq!(iter.peek_next(), Some(&mut 1));
+    assert_eq!(iter.peek_prev(), Some(&mut 6));
+    assert_eq!(iter.index(), None);
+    iter.move_prev();
+    iter.move_prev();
+    assert_eq!(iter.current(), Some(&mut 5));
+    assert_eq!(iter.peek_next(), Some(&mut 6));
+    assert_eq!(iter.peek_prev(), Some(&mut 4));
+    assert_eq!(iter.index(), Some(4));
+    let mut cursor2 = iter.as_cursor();
+    assert_eq!(cursor2.current(), Some(&5));
+    assert_eq!(cursor2.index(), Some(4));
+    cursor2.move_prev();
+    assert_eq!(cursor2.current(), Some(&4));
+    assert_eq!(cursor2.index(), Some(3));
+    assert_eq!(iter.current(), Some(&mut 5));
+    assert_eq!(iter.index(), Some(4));
+    */
 }
