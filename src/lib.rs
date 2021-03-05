@@ -490,13 +490,13 @@ impl<T> UnmoveableLinkedList<T> {
             return Err(LinkedListError::BadData);
         }
 
+        if node.element.is_none() {
+            return Err(LinkedListError::IteratorNotInList);
+        }
+
         if node.prev.is_none() && node.next.is_none() && self.len > 0 {
             // Bad data
             return Err(LinkedListError::BadData);
-        }
-
-        if node.element.is_none() {
-            return Err(LinkedListError::IteratorNotInList);
         }
 
         if node.prev == node.next {
@@ -832,7 +832,7 @@ impl<T> UnmoveableLinkedList<T> {
     }
 
     #[inline]
-    fn remove_iter(&mut self, iter: IterMut<T>) -> LinkedListResult<LinkedListItem<T>> {
+    fn remove_iter(&mut self, iter: &mut IterMut<T>) -> LinkedListResult<LinkedListItem<T>> {
         let node = self.contains_iter_mut(&iter)?;
 
         self.unlink_node(node.current)
@@ -849,10 +849,12 @@ impl<T> UnmoveableLinkedList<T> {
 
         let mut boxed = Box::pin(res);
         let container = unsafe { Pin::get_unchecked_mut(boxed.as_mut()) };
-        let container = unsafe { NonNull::new_unchecked(container) };
+        let mut container = unsafe { NonNull::new_unchecked(container) };
         let mut guard = boxed.end.write().unwrap();
 
         guard.borrow_mut().end = Arc::downgrade(&unsafe { container.as_ref() }.end);
+        guard.borrow_mut().leak =
+            Some(unsafe { NonNull::new_unchecked((&mut container.as_mut().end) as *mut Node<T>) });
         drop(guard);
 
         boxed
@@ -1081,7 +1083,10 @@ impl<T> LinkedList<T> {
     }
 
     #[inline]
-    pub fn remove_iter(&mut self, iter: IterMut<T>) -> LinkedListResult<LinkedListItem<T>> {
+    pub fn remove_iter_mut(
+        &mut self,
+        iter: &mut IterMut<T>,
+    ) -> LinkedListResult<LinkedListItem<T>> {
         self.data_mut().remove_iter(iter)
     }
 }

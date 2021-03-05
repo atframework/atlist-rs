@@ -194,87 +194,92 @@ fn test_iter_move_peek() {
     assert_eq!(iter.next(), None);
     assert_eq!(*iter.unwrap().as_ref(), 1);
 
-    /*
-    assert_eq!(iter.current(), None);
-    assert_eq!(iter.peek_next(), Some(&1));
-    assert_eq!(iter.peek_prev(), Some(&6));
-    assert_eq!(iter.index(), None);
-    iter.move_next();
-    iter.move_next();
-    assert_eq!(iter.current(), Some(&2));
-    assert_eq!(iter.peek_next(), Some(&3));
-    assert_eq!(iter.peek_prev(), Some(&1));
-    assert_eq!(iter.index(), Some(1));
-
-    let mut iter = m.cursor_back();
-    assert_eq!(iter.current(), Some(&6));
-    assert_eq!(iter.peek_next(), None);
-    assert_eq!(iter.peek_prev(), Some(&5));
-    assert_eq!(iter.index(), Some(5));
-    iter.move_next();
-    assert_eq!(iter.current(), None);
-    assert_eq!(iter.peek_next(), Some(&1));
-    assert_eq!(iter.peek_prev(), Some(&6));
-    assert_eq!(iter.index(), None);
-    iter.move_prev();
-    iter.move_prev();
-    assert_eq!(iter.current(), Some(&5));
-    assert_eq!(iter.peek_next(), Some(&6));
-    assert_eq!(iter.peek_prev(), Some(&4));
-    assert_eq!(iter.index(), Some(4));
+    let mut iter = m.iter_back();
+    assert_eq!(*iter.unwrap().as_ref(), 6);
+    assert_eq!(*iter.next().unwrap().as_ref(), 6);
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next_back(), None);
+    assert_eq!(*iter.unwrap().as_ref(), 6);
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 6);
+    assert_eq!(*iter.unwrap().as_ref(), 5);
 
     let mut m: LinkedList<u32> = LinkedList::new();
     m.extend(&[1, 2, 3, 4, 5, 6]);
-    let mut iter = m.cursor_front_mut();
-    assert_eq!(iter.current(), Some(&mut 1));
-    assert_eq!(iter.peek_next(), Some(&mut 2));
-    assert_eq!(iter.peek_prev(), None);
-    assert_eq!(iter.index(), Some(0));
-    iter.move_prev();
-    assert_eq!(iter.current(), None);
-    assert_eq!(iter.peek_next(), Some(&mut 1));
-    assert_eq!(iter.peek_prev(), Some(&mut 6));
-    assert_eq!(iter.index(), None);
-    iter.move_next();
-    iter.move_next();
-    assert_eq!(iter.current(), Some(&mut 2));
-    assert_eq!(iter.peek_next(), Some(&mut 3));
-    assert_eq!(iter.peek_prev(), Some(&mut 1));
-    assert_eq!(iter.index(), Some(1));
-    let mut cursor2 = iter.as_cursor();
-    assert_eq!(cursor2.current(), Some(&2));
-    assert_eq!(cursor2.index(), Some(1));
-    cursor2.move_next();
-    assert_eq!(cursor2.current(), Some(&3));
-    assert_eq!(cursor2.index(), Some(2));
-    assert_eq!(iter.current(), Some(&mut 2));
-    assert_eq!(iter.index(), Some(1));
+    let mut iter = m.iter_mut();
+    assert_eq!(*iter.unwrap().as_ref(), 1);
+    assert_eq!(*iter.next().unwrap().as_ref(), 1);
+    assert_eq!(*iter.next().unwrap().as_ref(), 2);
+    assert_eq!(*iter.unwrap().as_ref(), 3);
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 3);
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 2);
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 1);
+    assert_eq!(iter.next_back(), None);
+    assert_eq!(iter.try_unwrap(), Err(LinkedListError::IteratorNotInList));
+    assert_eq!(iter.next(), None);
+    assert_eq!(*iter.unwrap().as_ref(), 1);
 
+    let mut iter = m.iter_mut_back();
+    assert_eq!(*iter.unwrap().as_ref(), 6);
+    assert_eq!(*iter.next().unwrap().as_ref(), 6);
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next_back(), None);
+    assert_eq!(*iter.unwrap().as_ref(), 6);
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 6);
+    assert_eq!(*iter.unwrap().as_ref(), 5);
+}
+
+#[test]
+fn test_iter_mut_insert() {
     let mut m: LinkedList<u32> = LinkedList::new();
     m.extend(&[1, 2, 3, 4, 5, 6]);
-    let mut iter = m.cursor_back_mut();
-    assert_eq!(iter.current(), Some(&mut 6));
-    assert_eq!(iter.peek_next(), None);
-    assert_eq!(iter.peek_prev(), Some(&mut 5));
-    assert_eq!(iter.index(), Some(5));
-    iter.move_next();
-    assert_eq!(iter.current(), None);
-    assert_eq!(iter.peek_next(), Some(&mut 1));
-    assert_eq!(iter.peek_prev(), Some(&mut 6));
-    assert_eq!(iter.index(), None);
-    iter.move_prev();
-    iter.move_prev();
-    assert_eq!(iter.current(), Some(&mut 5));
-    assert_eq!(iter.peek_next(), Some(&mut 6));
-    assert_eq!(iter.peek_prev(), Some(&mut 4));
-    assert_eq!(iter.index(), Some(4));
-    let mut cursor2 = iter.as_cursor();
-    assert_eq!(cursor2.current(), Some(&5));
-    assert_eq!(cursor2.index(), Some(4));
-    cursor2.move_prev();
-    assert_eq!(cursor2.current(), Some(&4));
-    assert_eq!(cursor2.index(), Some(3));
-    assert_eq!(iter.current(), Some(&mut 5));
-    assert_eq!(iter.index(), Some(4));
-    */
+    let iter = m.iter_mut_front();
+    assert!(m.insert_before(&iter, 7).is_ok());
+    assert!(m.insert_after(&iter, 8).is_ok());
+    check_links(&m);
+
+    assert_eq!(
+        m.iter().map(|elt| *elt.as_ref()).collect::<Vec<_>>(),
+        &[7, 1, 8, 2, 3, 4, 5, 6]
+    );
+
+    let mut iter = m.iter_mut_front();
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 7);
+    assert!(m.insert_before(&iter, 9).is_ok());
+    assert!(m.insert_after(&iter, 10).is_ok());
+    check_links(&m);
+    assert_eq!(
+        m.iter().map(|elt| *elt.as_ref()).collect::<Vec<_>>(),
+        &[10, 7, 1, 8, 2, 3, 4, 5, 6, 9]
+    );
+
+    let mut iter = m.iter_mut_front();
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 10);
+    assert_eq!(
+        m.remove_iter_mut(&mut iter),
+        Err(LinkedListError::IteratorNotInList)
+    );
+    assert_eq!(iter.next(), None);
+    assert_eq!(*iter.next().unwrap().as_ref(), 10);
+    assert_eq!(*m.remove_iter_mut(&mut iter).unwrap(), 7);
+    assert_eq!(iter.try_unwrap(), Err(LinkedListError::IteratorNotInList));
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next_back(), None);
+
+    let mut iter = m.iter_mut_back();
+    assert_eq!(*m.remove_iter_mut(&mut iter).unwrap(), 9);
+    assert_eq!(iter.try_unwrap(), Err(LinkedListError::IteratorNotInList));
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next_back(), None);
+
+    let mut iter = m.iter_mut();
+    assert_eq!(*m.remove_iter_mut(&mut iter).unwrap(), 10);
+    assert_eq!(iter.try_unwrap(), Err(LinkedListError::IteratorNotInList));
+    assert_eq!(iter.next(), None);
+    assert_eq!(iter.next_back(), None);
+
+    check_links(&m);
+    assert_eq!(
+        m.iter().map(|elt| *elt.as_ref()).collect::<Vec<_>>(),
+        &[1, 8, 2, 3, 4, 5, 6]
+    );
 }
