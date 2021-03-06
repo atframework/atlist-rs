@@ -1,6 +1,6 @@
 [package]
 name = "atlist-rs"
-version = "0.2.0"
+version = "0.2.1"
 authors = ["owent <admin@owent.net>"]
 license = "MIT OR Apache-2.0"
 description = "A LinkedList which is allowed to insert/remove element by immutable iterator.Adding, removing and moving the elements within the list or across several lists does not invalidate the iterators or references. An iterator is invalidated only when the corresponding element is deleted."
