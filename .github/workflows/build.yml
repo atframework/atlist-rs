@@ -57,15 +57,15 @@ jobs:
             ~/prebuilt
             ~/.cargo
             !~/prebuilt/exclude
-          key: ${{ runner.os }}-${{ hashFiles('**/lockfiles') }}
+          key: ${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
       - name: Generate coverage
-        if: ${{ matrix.os == 'ubuntu-latest' }}
+        if: ${{ matrix.os == 'ubuntu-latest' && !startsWith(github.ref, 'refs/tags/') }}
         shell: bash
         run: |
           cargo install cargo-tarpaulin;
           cargo tarpaulin -v --all-features --timeout 120 --out Xml;
       - name: Uploaded code coverage
-        if: ${{ matrix.os == 'ubuntu-latest' }}
+        if: ${{ matrix.os == 'ubuntu-latest' && !startsWith(github.ref, 'refs/tags/') }}
         uses: codecov/codecov-action@v1
         with:
           # token: ${{secrets.CODECOV_TOKEN}} # not required for public repos
