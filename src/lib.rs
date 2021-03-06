@@ -115,9 +115,7 @@ impl Error for LinkedListError {
     }
 
     fn cause(&self) -> Option<&dyn Error> {
-        match self {
-            e => Some(e),
-        }
+        Some(self)
     }
 }
 
@@ -188,10 +186,28 @@ pub struct IterMut<T> {
 
 fn check_iter_valid<T>(iter: &Iter<T>) -> bool {
     iter.node.strong_count() > 0
+        && if let Some(x) = iter.node.upgrade() {
+            if let Ok(y) = x.read() {
+                y.element.is_some()
+            } else {
+                false
+            }
+        } else {
+            false
+        }
 }
 
 fn check_iter_mut_valid<T>(iter: &IterMut<T>) -> bool {
     iter.node.strong_count() > 0
+        && if let Some(x) = iter.node.upgrade() {
+            if let Ok(y) = x.read() {
+                y.element.is_some()
+            } else {
+                false
+            }
+        } else {
+            false
+        }
 }
 
 impl<T> NodeEntry<T> {
@@ -251,7 +267,16 @@ impl<T> Clone for Iter<T> {
     fn clone(&self) -> Self {
         Iter {
             node: self.node.clone(),
-            last_back: false,
+            last_back: self.last_back,
+        }
+    }
+}
+
+impl<T> Clone for IterMut<T> {
+    fn clone(&self) -> Self {
+        IterMut {
+            node: self.node.clone(),
+            last_back: self.last_back,
         }
     }
 }
@@ -422,7 +447,7 @@ impl<T> Iter<T> {
 
     fn from_weak(node: Weak<RwLock<NodeEntry<T>>>) -> Iter<T> {
         Iter {
-            node: node,
+            node,
             last_back: false,
         }
     }
@@ -449,7 +474,7 @@ impl<T> Iter<T> {
     }
 
     pub fn is_empty(&self) -> bool {
-        check_iter_valid(self)
+        !check_iter_valid(self)
     }
 }
 
@@ -463,7 +488,7 @@ impl<T> IterMut<T> {
 
     fn from_weak(node: Weak<RwLock<NodeEntry<T>>>) -> IterMut<T> {
         IterMut {
-            node: node,
+            node,
             last_back: false,
         }
     }
@@ -490,7 +515,7 @@ impl<T> IterMut<T> {
     }
 
     pub fn is_empty(&self) -> bool {
-        check_iter_mut_valid(self)
+        !check_iter_mut_valid(self)
     }
 }
 
@@ -934,7 +959,7 @@ impl<T> LinkedList<T> {
     pub fn new() -> Self {
         let data = UnmoveableLinkedList::new();
 
-        LinkedList { data: data }
+        LinkedList { data }
     }
 
     /// Returns the length of the `LinkedList`.
@@ -948,13 +973,13 @@ impl<T> LinkedList<T> {
     ///
     /// let mut dl = LinkedList::new();
     ///
-    /// dl.push_front(2);
+    /// let _ = dl.push_front(2);
     /// assert_eq!(dl.len(), 1);
     ///
-    /// dl.push_front(1);
+    /// let _ = dl.push_front(1);
     /// assert_eq!(dl.len(), 2);
     ///
-    /// dl.push_back(3);
+    /// let _ = dl.push_back(3);
     /// assert_eq!(dl.len(), 3);
     /// ```
     #[inline]
@@ -974,7 +999,7 @@ impl<T> LinkedList<T> {
     /// let mut dl = LinkedList::new();
     /// assert!(dl.is_empty());
     ///
-    /// dl.push_front("foo");
+    /// let _ = dl.push_front("foo");
     /// assert!(!dl.is_empty());
     /// ```
     #[inline]
@@ -1393,10 +1418,6 @@ impl<T: PartialEq> PartialEq for NodeEntry<T> {
     fn eq(&self, other: &Self) -> bool {
         self.element.as_ref() == other.element.as_ref()
     }
-
-    fn ne(&self, other: &Self) -> bool {
-        !self.eq(&other)
-    }
 }
 
 impl<T: Eq> Eq for NodeEntry<T> {}
@@ -1433,10 +1454,6 @@ where
 impl<T: PartialEq> PartialEq for LinkedList<T> {
     fn eq(&self, other: &Self) -> bool {
         self.len() == other.len() && _core_cmp_op_eq_list(&self, &other, |x, y| x == y)
-    }
-
-    fn ne(&self, other: &Self) -> bool {
-        self.len() != other.len() || !_core_cmp_op_eq_list(&self, &other, |x, y| x == y)
     }
 }
 
@@ -1544,7 +1561,7 @@ impl<T: Clone> Clone for LinkedList<T> {
             dst.clone_from(elem_other.as_ref());
         }
 
-        while let Some(elem) = iter_other.next() {
+        for elem in iter_other {
             let _ = self.push_back(elem.deref().clone());
         }
     }

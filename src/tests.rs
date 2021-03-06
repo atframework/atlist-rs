@@ -305,3 +305,101 @@ fn test_iter_mut_insert_into_empty_list() {
         &[1, 2, 3, 4]
     );
 }
+
+#[test]
+fn test_iter_len_is_empty() {
+    let mut m: LinkedList<u32> = LinkedList::new();
+    m.extend(&[1]);
+    let mut iter = m.iter();
+    assert!(!iter.is_empty());
+    assert_eq!(iter.clone().count(), 1);
+    assert_eq!(iter.size_hint(), (1, None));
+    let _ = iter.next_back();
+    assert!(iter.is_empty());
+    assert_eq!(iter.clone().count(), 0);
+    assert_eq!(iter.size_hint(), (0, None));
+
+    let mut iter = m.iter_mut();
+    assert!(!iter.is_empty());
+    assert_eq!(iter.clone().count(), 1);
+    assert_eq!(iter.size_hint(), (1, None));
+    let _ = iter.next_back();
+    assert!(iter.is_empty());
+    assert_eq!(iter.clone().count(), 0);
+    assert_eq!(iter.size_hint(), (0, None));
+}
+
+#[test]
+fn test_document_list_len() {
+    let mut dl = LinkedList::new();
+
+    let _ = dl.push_front(2);
+    assert_eq!(dl.len(), 1);
+
+    let _ = dl.push_front(1);
+    assert_eq!(dl.len(), 2);
+
+    let _ = dl.push_back(3);
+    assert_eq!(dl.len(), 3);
+}
+
+#[test]
+fn test_document_list_is_empty() {
+    let mut dl = LinkedList::new();
+    assert!(dl.is_empty());
+
+    let _ = dl.push_front("foo");
+    assert!(!dl.is_empty());
+}
+
+#[test]
+fn test_document_list_front() {
+    let mut dl = LinkedList::new();
+    assert_eq!(dl.front(), Err(LinkedListError::Empty));
+
+    let _ = dl.push_front(1);
+    assert_eq!(*dl.front().unwrap(), 1);
+}
+
+#[test]
+fn test_document_list_back() {
+    let mut dl = LinkedList::new();
+    assert_eq!(dl.back(), Err(LinkedListError::Empty));
+
+    let _ = dl.push_back(1);
+    assert_eq!(*dl.back().unwrap(), 1);
+}
+
+#[test]
+fn test_document_list_contains_iter() {
+    let mut list: LinkedList<u32> = LinkedList::new();
+    let mut another_list: LinkedList<u32> = LinkedList::new();
+
+    let _ = list.push_back(0);
+    let _ = list.push_back(1);
+    let _ = another_list.push_back(2);
+
+    assert_eq!(list.contains_iter(&list.iter()), Ok(()));
+    assert_eq!(
+        list.contains_iter(&another_list.iter()),
+        Err(LinkedListError::IteratorNotInList)
+    );
+}
+
+#[test]
+fn test_document_list_contains_iter_mut() {
+    let mut list: LinkedList<u32> = LinkedList::new();
+    let mut another_list: LinkedList<u32> = LinkedList::new();
+
+    let _ = list.push_back(0);
+    let _ = list.push_back(1);
+    let _ = another_list.push_back(2);
+
+    let iter = list.iter_mut();
+    let another_iter = another_list.iter_mut();
+    assert_eq!(list.contains_iter_mut(&iter), Ok(()));
+    assert_eq!(
+        list.contains_iter_mut(&another_iter),
+        Err(LinkedListError::IteratorNotInList)
+    );
+}
