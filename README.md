@@ -1,6 +1,7 @@
 # atlist
 
 [![github action badge]][github action url]
+[![codecov badge]][coverage status]
 [![crates.io badge]][crates.io package]
 [![docs.rs badge]][docs.rs documentation]
 [![license badge]][license]
@@ -16,6 +17,8 @@ We use ```core::cell::RefCell``` and ```std::sync::Arc``` to manange lifetime of
 
 [github action badge]: https://github.com/atframework/atlist-rs/actions/workflows/build.yml/badge.svg
 [github action url]: https://github.com/atframework/atlist-rs/actions/workflows/build.yml
+[codecov badge]: https://codecov.io/gh/atframework/atlist-rs/branch/master/graph/badge.svg
+[coverage status]: https://codecov.io/gh/atframework/atlist-rs
 [crates.io badge]: https://img.shields.io/crates/v/atlist-rs.svg
 [crates.io package]: https://crates.io/crates/atlist-rs/
 [documentation]: https://docs.rs/atlist-rs/
