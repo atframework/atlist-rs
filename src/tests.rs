@@ -264,22 +264,44 @@ fn test_iter_mut_insert() {
     assert_eq!(iter.try_unwrap(), Err(LinkedListError::IteratorNotInList));
     assert_eq!(iter.next(), None);
     assert_eq!(iter.next_back(), None);
+    assert_eq!(*iter.next().unwrap().as_ref(), 9);
 
     let mut iter = m.iter_mut_back();
+    let _ = iter.next();
+    let _ = iter.next_back();
     assert_eq!(*m.remove_iter_mut(&mut iter).unwrap(), 9);
     assert_eq!(iter.try_unwrap(), Err(LinkedListError::IteratorNotInList));
-    assert_eq!(iter.next(), None);
     assert_eq!(iter.next_back(), None);
+    assert_eq!(iter.next(), None);
+    assert_eq!(*iter.next_back().unwrap().as_ref(), 10);
 
     let mut iter = m.iter_mut();
     assert_eq!(*m.remove_iter_mut(&mut iter).unwrap(), 10);
     assert_eq!(iter.try_unwrap(), Err(LinkedListError::IteratorNotInList));
     assert_eq!(iter.next(), None);
     assert_eq!(iter.next_back(), None);
+    assert_eq!(*iter.next().unwrap().as_ref(), 6);
 
     check_links(&m);
     assert_eq!(
         m.iter().map(|elt| *elt.as_ref()).collect::<Vec<_>>(),
         &[1, 8, 2, 3, 4, 5, 6]
+    );
+}
+
+#[test]
+fn test_iter_mut_insert_into_empty_list() {
+    let mut m: LinkedList<u32> = LinkedList::new();
+    let iter = m.iter_mut();
+
+    assert!(m.insert_before(&iter, 3).is_ok());
+    assert!(m.insert_after(&iter, 2).is_ok());
+    assert!(m.insert_before(&iter, 4).is_ok());
+    assert!(m.insert_after(&iter, 1).is_ok());
+
+    check_links(&m);
+    assert_eq!(
+        m.iter().map(|elt| *elt.as_ref()).collect::<Vec<_>>(),
+        &[1, 2, 3, 4]
     );
 }

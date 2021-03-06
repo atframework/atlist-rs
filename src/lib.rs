@@ -27,6 +27,21 @@
 //!
 //! ## Example
 //!
+//! ```rust,no_run
+//! extern crate atlist_rs;
+//!
+//! use atlist_rs::LinkedList;
+//!
+//! fn main() {
+//!         let mut l = LinkedList::new();
+//!         let _ = l.push_back(3);
+//!         let _ = l.push_front(2);
+//!
+//!         assert_eq!(l.len(), 2);
+//!         assert_eq!(*l.front().unwrap(), 2);
+//!         assert_eq!(*l.back().unwrap(), 3);
+//! }
+//! ```
 
 //#![no_std]
 #![cfg_attr(feature = "nightly", feature(negative_impls, auto_traits))]
@@ -135,15 +150,37 @@ struct UnmoveableLinkedList<T> {
     len: usize,
 }
 
+/// A doubly-linked list in which the liftime of iterator is independent from
+/// self.
+///
+/// The `LinkedList` allows pushing and popping elements at either end
+/// in constant time.
 pub struct LinkedList<T> {
     data: Pin<Box<UnmoveableLinkedList<T>>>,
 }
 
+/// An iterator over the elements of a `LinkedList`.
+///
+/// This `struct` is created by [`LinkedList::iter()`]. See its
+/// documentation for more.
+///
+/// This iterator is just like `std::collections::linked_list::Cursor`
+/// but it's allowed to be saved into anywhere and can be converted into
+/// `IterMut`. by any time.
 pub struct Iter<T> {
     node: Weak<RwLock<NodeEntry<T>>>,
     last_back: bool,
 }
 
+/// A mutable iterator over the elements of a `LinkedList`.
+///
+/// This `struct` is created by [`LinkedList::iter_mut()`]. See its
+/// documentation for more.
+///
+/// This iterator is just like `std::collections::linked_list::CursorMut`
+/// but it can freely seek back-and-forth, and can safely mutate the list
+/// during iteration and also it can also be saved into anywhere and yield
+/// multiple elements at once.We will use `std::sync::RwLock` to keep it safe.
 pub struct IterMut<T> {
     node: Weak<RwLock<NodeEntry<T>>>,
     last_back: bool,
@@ -376,13 +413,6 @@ impl<T> FusedIterator for Iter<T> {}
 impl<T> FusedIterator for IterMut<T> {}
 
 impl<T> Iter<T> {
-    fn new() -> Iter<T> {
-        Iter {
-            node: Weak::new(),
-            last_back: false,
-        }
-    }
-
     fn from(node: &Node<T>) -> Iter<T> {
         Iter {
             node: Arc::downgrade(&node),
@@ -424,13 +454,6 @@ impl<T> Iter<T> {
 }
 
 impl<T> IterMut<T> {
-    fn new() -> IterMut<T> {
-        IterMut {
-            node: Weak::new(),
-            last_back: false,
-        }
-    }
-
     fn from(node: &Node<T>) -> IterMut<T> {
         IterMut {
             node: Arc::downgrade(&node),
@@ -835,7 +858,10 @@ impl<T> UnmoveableLinkedList<T> {
     fn remove_iter(&mut self, iter: &mut IterMut<T>) -> LinkedListResult<LinkedListItem<T>> {
         let node = self.contains_iter_mut(&iter)?;
 
-        self.unlink_node(node.current)
+        let ret = self.unlink_node(node.current)?;
+        iter.node = Arc::downgrade(&self.end);
+
+        Ok(ret)
     }
 }
 
@@ -895,6 +921,15 @@ impl<T> LinkedList<T> {
         unsafe { Pin::get_unchecked_mut(self.data.as_mut()) }
     }
 
+    /// Creates an empty `LinkedList`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atlist_rs::LinkedList;
+    ///
+    /// let list: LinkedList<u32> = LinkedList::new();
+    /// ```
     #[inline]
     pub fn new() -> Self {
         let data = UnmoveableLinkedList::new();
@@ -902,11 +937,46 @@ impl<T> LinkedList<T> {
         LinkedList { data: data }
     }
 
+    /// Returns the length of the `LinkedList`.
+    ///
+    /// This operation should compute in *O*(1) time.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atlist_rs::LinkedList;
+    ///
+    /// let mut dl = LinkedList::new();
+    ///
+    /// dl.push_front(2);
+    /// assert_eq!(dl.len(), 1);
+    ///
+    /// dl.push_front(1);
+    /// assert_eq!(dl.len(), 2);
+    ///
+    /// dl.push_back(3);
+    /// assert_eq!(dl.len(), 3);
+    /// ```
     #[inline]
     pub fn len(&self) -> usize {
         self.data.len
     }
 
+    /// Returns `true` if the `LinkedList` is empty.
+    ///
+    /// This operation should compute in *O*(1) time.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atlist_rs::LinkedList;
+    ///
+    /// let mut dl = LinkedList::new();
+    /// assert!(dl.is_empty());
+    ///
+    /// dl.push_front("foo");
+    /// assert!(!dl.is_empty());
+    /// ```
     #[inline]
     pub fn is_empty(&self) -> bool {
         0 == self.data.len
@@ -915,54 +985,126 @@ impl<T> LinkedList<T> {
     /// Removes all elements from the `LinkedList`.
     ///
     /// This operation should compute in *O*(*n*) time.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atlist_rs::{LinkedList, LinkedListError};
+    ///
+    /// let mut dl = LinkedList::new();
+    ///
+    /// dl.push_front(2);
+    /// dl.push_front(1);
+    /// assert_eq!(dl.len(), 2);
+    /// assert_eq!(*dl.front().unwrap(), 1);
+    ///
+    /// dl.clear();
+    /// assert_eq!(dl.len(), 0);
+    /// assert_eq!(dl.front(), Err(LinkedListError::Empty));
+    /// ```
     #[inline]
     pub fn clear(&mut self) {
         *self = Self::new();
     }
 
+    /// Provides a forward iterator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atlist_rs::LinkedList;
+    ///
+    /// let mut list: LinkedList<u32> = LinkedList::new();
+    ///
+    /// let _ = list.push_back(0);
+    /// let _ = list.push_back(1);
+    /// let _ = list.push_back(2);
+    ///
+    /// let mut iter = list.iter();
+    /// assert_eq!(*iter.next().unwrap(), 0);
+    /// assert_eq!(*iter.next().unwrap(), 1);
+    /// assert_eq!(*iter.next().unwrap(), 2);
+    /// assert_eq!(iter.next(), None);
+    /// ```
     #[inline]
     pub fn iter(&self) -> Iter<T> {
         self.iter_front()
     }
 
+    /// Provides a forward iterator.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atlist_rs::LinkedList;
+    /// use std::cell::RefCell;
+    ///
+    /// let mut list: LinkedList<RefCell<u32>> = LinkedList::new();
+    ///
+    /// let _ = list.push_back(RefCell::new(0));
+    /// let _ = list.push_back(RefCell::new(1));
+    /// let _ = list.push_back(RefCell::new(2));
+    ///
+    /// for element in list.iter_mut() {
+    ///     *(*element).borrow_mut() += 10;
+    /// }
+    ///
+    /// let mut iter = list.iter_mut();
+    /// assert_eq!(*(*iter.next().unwrap()).borrow(), 10);
+    /// assert_eq!(*(*iter.next().unwrap()).borrow(), 11);
+    /// assert_eq!(*(*iter.next().unwrap()).borrow(), 12);
+    /// assert_eq!(iter.next(), None);
+    /// ```
     #[inline]
     pub fn iter_mut(&mut self) -> IterMut<T> {
         self.iter_mut_front()
     }
 
+    /// Provides a iterator at the front element.
+    ///
+    /// The iterator is pointing to the "ghost" non-element if the list is empty.
     #[inline]
     pub fn iter_front(&self) -> Iter<T> {
         if let Some(head) = self.data.get_head() {
             Iter::from(unsafe { head.as_ref() })
         } else {
-            Iter::new()
+            Iter::from_weak(Arc::downgrade(&self.data.end))
         }
     }
 
+    /// Provides a iterator at the back element.
+    ///
+    /// The iterator is pointing to the "ghost" non-element if the list is empty.
     #[inline]
     pub fn iter_back(&self) -> Iter<T> {
         if let Some(tail) = self.data.get_tail() {
             Iter::from(unsafe { tail.as_ref() })
         } else {
-            Iter::new()
+            Iter::from_weak(Arc::downgrade(&self.data.end))
         }
     }
 
+    /// Provides a iterator with editing operations at the front element.
+    ///
+    /// The iterator is pointing to the "ghost" non-element if the list is empty.
     #[inline]
     pub fn iter_mut_front(&mut self) -> IterMut<T> {
         if let Some(head) = self.data.get_head() {
             IterMut::from(unsafe { head.as_ref() })
         } else {
-            IterMut::new()
+            IterMut::from_weak(Arc::downgrade(&self.data.end))
         }
     }
 
+    /// Provides a iterator with editing operations at the back element.
+    ///
+    /// The iterator is pointing to the "ghost" non-element if the list is empty.
     #[inline]
     pub fn iter_mut_back(&mut self) -> IterMut<T> {
         if let Some(tail) = self.data.get_tail() {
             IterMut::from(unsafe { tail.as_ref() })
         } else {
-            IterMut::new()
+            IterMut::from_weak(Arc::downgrade(&self.data.end))
         }
     }
 
@@ -1010,6 +1152,18 @@ impl<T> LinkedList<T> {
 
     /// Provides a reference to the front element, or `None` if the list is
     /// empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atlist_rs::{LinkedList, LinkedListError};
+    ///
+    /// let mut dl = LinkedList::new();
+    /// assert_eq!(dl.front(), Err(LinkedListError::Empty));
+    ///
+    /// let _ = dl.push_front(1);
+    /// assert_eq!(*dl.front().unwrap(), 1);
+    /// ```
     #[inline]
     pub fn front(&self) -> LinkedListResult<LinkedListItem<T>> {
         if let Some(head) = self.data.get_head() {
@@ -1024,6 +1178,18 @@ impl<T> LinkedList<T> {
 
     /// Provides a reference to the back element, or `None` if the list is
     /// empty.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atlist_rs::{LinkedList, LinkedListError};
+    ///
+    /// let mut dl = LinkedList::new();
+    /// assert_eq!(dl.back(), Err(LinkedListError::Empty));
+    ///
+    /// let _ = dl.push_back(1);
+    /// assert_eq!(*dl.back().unwrap(), 1);
+    /// ```
     #[inline]
     pub fn back(&self) -> LinkedListResult<LinkedListItem<T>> {
         if let Some(tail) = self.data.get_tail() {
@@ -1036,20 +1202,60 @@ impl<T> LinkedList<T> {
         }
     }
 
+    /// Returns `true` if the `LinkedList` contains an element equal to the
+    /// given value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atlist_rs::{LinkedList, LinkedListError};
+    ///
+    /// let mut list: LinkedList<u32> = LinkedList::new();
+    /// let mut another_list: LinkedList<u32> = LinkedList::new();
+    ///
+    /// let _ = list.push_back(0);
+    /// let _ = list.push_back(1);
+    /// let _ = another_list.push_back(2);
+    ///
+    /// assert_eq!(list.contains_iter(&list.iter()), Ok(()));
+    /// assert_eq!(list.contains_iter(&another_list.iter()), Err(LinkedListError::IteratorNotInList));
+    /// ```
     #[inline]
-    pub fn contains_iter(&self, x: &Iter<T>) -> LinkedListResult<bool> {
-        self.data.contains_iter(&x).map(|_| true)
+    pub fn contains_iter(&self, x: &Iter<T>) -> LinkedListResult<()> {
+        self.data.contains_iter(&x).map(|_| ())
     }
 
+    /// Returns `true` if the `LinkedList` contains an element equal to the
+    /// given value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use atlist_rs::{LinkedList, LinkedListError};
+    ///
+    /// let mut list: LinkedList<u32> = LinkedList::new();
+    /// let mut another_list: LinkedList<u32> = LinkedList::new();
+    ///
+    /// let _ = list.push_back(0);
+    /// let _ = list.push_back(1);
+    /// let _ = another_list.push_back(2);
+    ///
+    /// let iter = list.iter_mut();
+    /// let another_iter = another_list.iter_mut();
+    /// assert_eq!(list.contains_iter_mut(&iter), Ok(()));
+    /// assert_eq!(list.contains_iter_mut(&another_iter), Err(LinkedListError::IteratorNotInList));
+    /// ```
     #[inline]
-    pub fn contains_iter_mut(&self, x: &IterMut<T>) -> LinkedListResult<bool> {
-        self.data.contains_iter_mut(&x).map(|_| true)
+    pub fn contains_iter_mut(&self, x: &IterMut<T>) -> LinkedListResult<()> {
+        self.data.contains_iter_mut(&x).map(|_| ())
     }
 
     /// Inserts a new element into the `LinkedList` before the current one.
     ///
     /// If the cursor is pointing at the "ghost" non-element then the new element is
     /// inserted at the end of the `LinkedList`.
+    ///
+    /// Returns the iterator of inserted value if success, or error if failed
     #[inline]
     pub fn insert_before(&mut self, iter: &IterMut<T>, elt: T) -> LinkedListResult<IterMut<T>> {
         let current = self.data.contains_iter_mut(&iter)?;
@@ -1068,6 +1274,8 @@ impl<T> LinkedList<T> {
     ///
     /// If the cursor is pointing at the "ghost" non-element then the new element is
     /// inserted at the front of the `LinkedList`.
+    ///
+    /// Returns the iterator of inserted value if success, or error if failed
     #[inline]
     pub fn insert_after(&mut self, iter: &IterMut<T>, elt: T) -> LinkedListResult<IterMut<T>> {
         let current = self.data.contains_iter_mut(&iter)?;
@@ -1082,6 +1290,14 @@ impl<T> LinkedList<T> {
             .splice_node(Some(current.current), current.next, new_node)
     }
 
+    /// Removes the current iterator from the `LinkedList`.
+    ///
+    /// The element that was removed is returned, the iterator will point to
+    /// the "ghost" non-element.
+    ///
+    /// If the iterator is currently pointing to the "ghost" non-element then
+    /// no element is removed and `Err(LinkedListError::IteratorNotInList)` is
+    /// returned.
     #[inline]
     pub fn remove_iter_mut(
         &mut self,
